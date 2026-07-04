@@ -2,7 +2,7 @@
 //! checkpoint, load the container object map, and enumerate volumes (rewrite
 //! plan Phases 6 and 9).
 
-use std::sync::Arc;
+use std::{cmp::Reverse, sync::Arc};
 
 use super::btree::BtreeReader;
 use super::checksum;
@@ -110,7 +110,7 @@ impl Container {
             )));
         }
         // Highest XID first; fall back to older checkpoints if the newest fails.
-        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+        candidates.sort_by_key(|candidate| Reverse(candidate.1));
 
         for (index, xid) in candidates {
             let blk = dev.read_block(xp_desc_base as u64 + index as u64, block_size)?;

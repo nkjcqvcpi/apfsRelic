@@ -60,10 +60,8 @@ impl Volume {
         let mut warnings = Vec::new();
 
         // Feature gate: errors only on unknown incompatible bits.
-        match feature::check_volume(&apsb) {
-            Ok(report) => warnings.extend(report.warnings),
-            Err(e) => return Err(e),
-        }
+        let report = feature::check_volume(&apsb)?;
+        warnings.extend(report.warnings);
 
         // Volume object map (physical object -> physical B-tree root).
         let omap_blk = dev.read_block(apsb.omap_oid, block_size)?;

@@ -12,7 +12,9 @@
 
 use std::borrow::Cow;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+#[cfg(target_os = "macos")]
+use std::io::Read;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::cli::Options;

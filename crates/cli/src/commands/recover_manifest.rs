@@ -238,7 +238,7 @@ pub fn run(opts: &Options) -> Result<i32> {
             continue;
         }
         match fs::symlink_metadata(&target) {
-            Ok(metadata) if !opts.overwrite => {
+            Ok(_) if !opts.overwrite => {
                 emit_skipped(&mut output, &row, "destination already exists")?;
                 summary.observe("skipped-exists");
                 continue;

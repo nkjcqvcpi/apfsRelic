@@ -1,10 +1,12 @@
 //! CLI subcommands. Each command has a text path and a `--json` path that never
 //! interleaves diagnostics with stdout JSON (AGENTS.md rule 4).
 
+pub mod history_union;
 pub mod inspect;
 pub mod ls;
 pub mod partitions;
 pub mod recover;
+pub mod recover_manifest;
 pub mod snapshots;
 pub mod stat;
 pub mod verify;

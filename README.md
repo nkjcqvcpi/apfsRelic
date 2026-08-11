@@ -42,13 +42,41 @@ WebKitGTK build dependencies (see `.github/workflows/ci.yml`).
 apfsrelic inspect   --container tm.sparsebundle --json
 apfsrelic volumes   --container tm.sparsebundle --json
 apfsrelic snapshots --container tm.sparsebundle --volume 1 --json
+apfsrelic history-union --container tm.sparsebundle --volume 1 \
+  --path-template '/{snapshot-dir}/Macintosh HD - Data/Users/me' \
+  --format jsonl --output history.jsonl --best-effort
 apfsrelic ls        --container tm.sparsebundle --volume 1 --path / --json --sizes
 apfsrelic stat      --container tm.sparsebundle --volume 1 --path /Users/me/f --json --extents
 apfsrelic recover   --container tm.sparsebundle --volume 1 --path /Users/me/f --output ./f
+apfsrelic recover-manifest --container tm.sparsebundle --volume 1 \
+  --manifest recovery.jsonl --output-root ./restored --fallback-history \
+  --path-template '/{snapshot-dir}/Macintosh HD - Data/Users/me' > results.jsonl
 apfsrelic verify    --container tm.sparsebundle --volume 1 --json
 ```
 
 `apfsrelic help` lists every command and option.
+
+`history-union` opens the image once, scans snapshots oldest to newest, and
+emits one ordinary-file or symlink row per raw relative path. The latest
+observation wins. Rows absent from the latest selected snapshot are marked
+`historical_deleted`; paths below an unreadable latest-snapshot prefix are
+`unknown_latest_scan`, not falsely classified as deleted. Directories are used
+only to detect structural conflicts. `--snapshot` or `--snapshot-xid` sets the
+latest boundary. `{snapshot}` expands to the full APFS snapshot name, while
+`{snapshot-dir}` removes the `com.apple.TimeMachine.` prefix so it matches the
+backup directory name. JSONL and TSV manifests include the selected source path,
+snapshot name/XID/date, logical size, decision, and reason. `collision_key` is a
+lowercase audit hint only; the raw relative path is the authoritative key.
+
+`recover-manifest` consumes JSONL rows with `snapshot_xid`, `source_path`, and
+`output_relative_path`. Optional `snapshot_name`, `fsoid`, and `type` fields are
+checked against the selected source. `--fallback-history` also requires
+`relative_path`; an error or partial extraction is then retried in each older
+snapshot using `--path-template`. Only a complete attempt is installed. Results
+are flushed as JSONL and record every attempted snapshot plus the actual source
+snapshot. Output paths must remain below `--output-root`; absolute paths, `..`,
+and symbolic-link parents are rejected. Existing leaves are skipped unless
+`--overwrite` is explicit.
 
 ## GUI
 

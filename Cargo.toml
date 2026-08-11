@@ -11,11 +11,11 @@ members = ["crates/core", "crates/cli", "crates/gui"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.77"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/apfsRelic/apfsRelic"
+repository = "https://github.com/nkjcqvcpi/apfsRelic"
 
 [workspace.dependencies]
 apfsrelic-core = { path = "crates/core" }

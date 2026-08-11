@@ -10,8 +10,10 @@
 pub mod btree;
 pub mod checksum;
 pub mod container;
+pub mod decmpfs;
 pub mod extract;
 pub mod feature;
+pub mod history;
 pub mod jrec;
 pub mod nx;
 pub mod obj;

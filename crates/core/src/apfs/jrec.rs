@@ -32,6 +32,7 @@ pub const INODE_IS_SPARSE: u64 = 0x0000_0200;
 pub const INODE_HAS_FINDER_INFO: u64 = 0x0000_0100;
 pub const INODE_HAS_RSRC_FORK: u64 = 0x0000_4000;
 pub const INODE_HAS_UNCOMPRESSED_SIZE: u64 = 0x0004_0000;
+pub const UF_COMPRESSED: u32 = 0x0000_0020;
 
 // ---- Directory-entry file-type nibble (DREC_TYPE_MASK = 0x000f) ----
 pub const DREC_TYPE_MASK: u16 = 0x000f;
@@ -156,6 +157,9 @@ impl Inode {
     pub fn has_finder_info(&self) -> bool {
         self.internal_flags & INODE_HAS_FINDER_INFO != 0
     }
+    pub fn is_compressed(&self) -> bool {
+        self.bsd_flags & UF_COMPRESSED != 0
+    }
 }
 
 /// A parsed directory-entry record (`j_drec_hashed_key_t` + `j_drec_val_t`).
@@ -262,6 +266,39 @@ pub struct Xattr {
 pub const XATTR_DATA_STREAM: u16 = 0x1;
 pub const XATTR_DATA_EMBEDDED: u16 = 0x2;
 
+/// The data-stream descriptor stored in a stream-backed xattr value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct XattrDstream {
+    pub xattr_obj_id: u64,
+    pub size: u64,
+    pub allocated_size: u64,
+    pub default_crypto_id: u64,
+    pub total_bytes_written: u64,
+    pub total_bytes_read: u64,
+}
+
+impl XattrDstream {
+    pub const ENCODED_LEN: usize = 48;
+
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        if data.len() < Self::ENCODED_LEN {
+            return Err(corrupt(format!(
+                "xattr data-stream descriptor too short ({} < {})",
+                data.len(),
+                Self::ENCODED_LEN
+            )));
+        }
+        Ok(Self {
+            xattr_obj_id: raw::u64_at(data, 0)?,
+            size: raw::u64_at(data, 8)?,
+            allocated_size: raw::u64_at(data, 16)?,
+            default_crypto_id: raw::u64_at(data, 24)?,
+            total_bytes_written: raw::u64_at(data, 32)?,
+            total_bytes_read: raw::u64_at(data, 40)?,
+        })
+    }
+}
+
 impl Xattr {
     pub fn parse(key: &[u8], val: &[u8]) -> Result<Xattr> {
         let name_len = raw::u16_at(key, 8)? as usize;
@@ -277,6 +314,14 @@ impl Xattr {
     }
     pub fn is_stream(&self) -> bool {
         self.flags & XATTR_DATA_STREAM != 0
+    }
+
+    pub fn dstream(&self) -> Result<Option<XattrDstream>> {
+        if self.is_stream() {
+            Ok(Some(XattrDstream::parse(&self.data)?))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -324,5 +369,30 @@ impl SnapName {
             name,
             snap_xid: raw::u64_at(val, 0)?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_xattr_data_stream_descriptor() {
+        let values = [0x1234u64, 99, 128, 7, 456, 321];
+        let mut data = Vec::new();
+        for value in values {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        let stream = XattrDstream::parse(&data).expect("valid descriptor");
+        assert_eq!(stream.xattr_obj_id, 0x1234);
+        assert_eq!(stream.size, 99);
+        assert_eq!(stream.allocated_size, 128);
+        assert_eq!(stream.default_crypto_id, 7);
+        assert_eq!(stream.total_bytes_written, 456);
+        assert_eq!(stream.total_bytes_read, 321);
+        assert_eq!(
+            XattrDstream::parse(&data[..47]).unwrap_err().kind(),
+            crate::error::ErrorKind::Corrupt
+        );
     }
 }

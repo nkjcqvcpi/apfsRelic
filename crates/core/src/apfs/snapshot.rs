@@ -42,8 +42,11 @@ pub fn list_snapshots(vol: &Volume, bt: &BtreeReader) -> Result<Vec<SnapshotInfo
     let (root_block, omap_root) = if physical {
         (tree_oid, None)
     } else {
-        match bt.omap_get(vol.omap_tree_root, tree_oid, vol.max_xid)? {
-            Some(e) => (e.val.paddr, Some(vol.omap_tree_root)),
+        match super::resolver::readable_paddr(
+            bt.omap_get(vol.omap_tree_root, tree_oid, vol.max_xid)?,
+            &format!("snapshot metadata tree {tree_oid:#x}"),
+        )? {
+            Some(paddr) => (paddr, Some(vol.omap_tree_root)),
             None => return Ok(Vec::new()),
         }
     };
@@ -97,14 +100,16 @@ pub fn open_snapshot(live: &Volume, bt: &BtreeReader, snap: &SnapshotInfo) -> Re
     let apsb = ApfsSuperblock::parse(&blk)?;
     apsb.check_magic()?;
 
-    let root_entry = bt
-        .omap_get(live.omap_tree_root, apsb.root_tree_oid, snap.xid)?
-        .ok_or_else(|| {
-            crate::error::not_found_obj(format!(
-                "snapshot root tree (virtual OID {:#x}) not in volume omap at xid {:#x}",
-                apsb.root_tree_oid, snap.xid
-            ))
-        })?;
+    let root_tree_root = super::resolver::readable_paddr(
+        bt.omap_get(live.omap_tree_root, apsb.root_tree_oid, snap.xid)?,
+        &format!("snapshot root tree {:#x}", apsb.root_tree_oid),
+    )?
+    .ok_or_else(|| {
+        crate::error::not_found_obj(format!(
+            "snapshot root tree (virtual OID {:#x}) not in volume omap at xid {:#x}",
+            apsb.root_tree_oid, snap.xid
+        ))
+    })?;
 
     let mut warnings = Vec::new();
     if let Ok(report) = crate::apfs::feature::check_volume(&apsb) {
@@ -116,7 +121,7 @@ pub fn open_snapshot(live: &Volume, bt: &BtreeReader, snap: &SnapshotInfo) -> Re
         block_size: live.block_size,
         apsb,
         omap_tree_root: live.omap_tree_root,
-        root_tree_root: root_entry.val.paddr,
+        root_tree_root,
         max_xid: snap.xid,
         warnings,
     })

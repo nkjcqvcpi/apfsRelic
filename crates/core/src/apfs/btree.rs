@@ -47,6 +47,13 @@ pub struct Record {
 /// Returns `Ok(false)` to stop the walk early.
 pub type RecordVisitor<'f> = dyn FnMut(&[u8], &[u8]) -> Result<bool> + 'f;
 
+#[derive(Clone, Copy)]
+struct FsCollectQuery {
+    omap_root: Option<u64>,
+    oid: u64,
+    max_xid: u64,
+}
+
 /// A validated view onto a B-tree node's geometry, borrowing the block bytes.
 struct NodeView<'a> {
     block: &'a [u8],
@@ -224,16 +231,23 @@ impl<'a> BtreeReader<'a> {
         Ok(rc)
     }
 
+    fn node_view<'b>(&self, block: &'b [u8], paddr: u64) -> Result<NodeView<'b>> {
+        NodeView::parse(block, self.block_size as usize)
+            .map_err(|error| error.with_context(node_context(block, paddr)))
+    }
+
     /// Exact `(oid, xid)` lookup in a physical object-map B-tree rooted at block
     /// `root_block`. Returns the entry with the given `oid` and the greatest
     /// `xid <= max_xid`, or `None` if absent.
     pub fn omap_get(&self, root_block: u64, oid: u64, max_xid: u64) -> Result<Option<OmapEntry>> {
-        let mut block = self.read_node(root_block)?;
+        let mut paddr = root_block;
+        let mut block = self.read_node(paddr)?;
 
         for _ in 0..MAX_NODE_DESCENT {
-            let v = NodeView::parse(&block, self.block_size as usize)?;
+            let v = self.node_view(&block, paddr)?;
             if !v.fixed {
-                return Err(corrupt("object-map node is not fixed-kv"));
+                return Err(corrupt("object-map node is not fixed-kv")
+                    .with_context(node_context(&block, paddr)));
             }
 
             // Pick the last entry whose oid < target, or oid == target and
@@ -264,7 +278,8 @@ impl<'a> BtreeReader<'a> {
 
             // Nonleaf: child link is a physical block address (8 bytes).
             let child = raw::u64_at(v.val_ptr(voff, 8)?, 0)?;
-            block = self.read_node(child)?;
+            paddr = child;
+            block = self.read_node(paddr)?;
         }
         Err(corrupt("object-map descent exceeded depth cap"))
     }
@@ -280,7 +295,10 @@ impl<'a> BtreeReader<'a> {
         max_xid: u64,
     ) -> Result<Option<u64>> {
         match omap_root {
-            Some(root) => Ok(self.omap_get(root, link, max_xid)?.map(|e| e.val.paddr)),
+            Some(root) => super::resolver::readable_paddr(
+                self.omap_get(root, link, max_xid)?,
+                &format!("virtual B-tree child {link:#x}"),
+            ),
             None => Ok(Some(link)),
         }
     }
@@ -298,25 +316,30 @@ impl<'a> BtreeReader<'a> {
     ) -> Result<Vec<Record>> {
         let mut out = Vec::new();
         let root = self.read_node(fs_root_block)?;
-        self.fs_collect_node(&root, omap_root, oid, max_xid, &mut out, 0)?;
+        let query = FsCollectQuery {
+            omap_root,
+            oid,
+            max_xid,
+        };
+        self.fs_collect_node(&root, fs_root_block, query, &mut out, 0)?;
         Ok(out)
     }
 
     fn fs_collect_node(
         &self,
         block: &[u8],
-        omap_root: Option<u64>,
-        oid: u64,
-        max_xid: u64,
+        paddr: u64,
+        query: FsCollectQuery,
         out: &mut Vec<Record>,
         depth: u16,
     ) -> Result<()> {
         if depth > MAX_NODE_DESCENT {
             return Err(corrupt("fs-tree descent exceeded depth cap"));
         }
-        let v = NodeView::parse(block, self.block_size as usize)?;
+        let v = self.node_view(block, paddr)?;
         if v.fixed {
-            return Err(corrupt("filesystem tree node has fixed-kv geometry"));
+            return Err(corrupt("filesystem tree node has fixed-kv geometry")
+                .with_context(node_context(block, paddr)));
         }
 
         if v.leaf {
@@ -324,10 +347,10 @@ impl<'a> BtreeReader<'a> {
                 let (koff, klen, voff, vlen) = v.var_toc(i)?;
                 let key = v.key_ptr(koff, klen as usize)?;
                 let obj_id = raw::u64_at(key, 0)? & OBJ_ID_MASK;
-                if obj_id < oid {
+                if obj_id < query.oid {
                     continue;
                 }
-                if obj_id > oid {
+                if obj_id > query.oid {
                     break; // sorted: no more records for this oid
                 }
                 if out.len() >= MAX_FS_RECORDS {
@@ -352,14 +375,16 @@ impl<'a> BtreeReader<'a> {
             } else {
                 u64::MAX
             };
-            if key_i > oid {
+            if key_i > query.oid {
                 break;
             }
-            if key_i <= oid && oid <= next_oid {
+            if key_i <= query.oid && query.oid <= next_oid {
                 let child_link = raw::u64_at(v.val_ptr(voff, 8)?, 0)?;
-                if let Some(child_paddr) = self.resolve_child(omap_root, child_link, max_xid)? {
+                if let Some(child_paddr) =
+                    self.resolve_child(query.omap_root, child_link, query.max_xid)?
+                {
                     let child = self.read_node(child_paddr)?;
-                    self.fs_collect_node(&child, omap_root, oid, max_xid, out, depth + 1)?;
+                    self.fs_collect_node(&child, child_paddr, query, out, depth + 1)?;
                 } else {
                     self.warn(format!(
                         "volume omap has no object for virtual OID {child_link:#x}"
@@ -381,13 +406,14 @@ impl<'a> BtreeReader<'a> {
         visit: &mut RecordVisitor,
     ) -> Result<()> {
         let root = self.read_node(fs_root_block)?;
-        self.fs_walk_node(&root, omap_root, max_xid, visit, 0)?;
+        self.fs_walk_node(&root, fs_root_block, omap_root, max_xid, visit, 0)?;
         Ok(())
     }
 
     fn fs_walk_node(
         &self,
         block: &[u8],
+        paddr: u64,
         omap_root: Option<u64>,
         max_xid: u64,
         visit: &mut RecordVisitor,
@@ -396,9 +422,10 @@ impl<'a> BtreeReader<'a> {
         if depth > MAX_NODE_DESCENT {
             return Err(corrupt("fs-tree walk exceeded depth cap"));
         }
-        let v = NodeView::parse(block, self.block_size as usize)?;
+        let v = self.node_view(block, paddr)?;
         if v.fixed {
-            return Err(corrupt("filesystem tree node has fixed-kv geometry"));
+            return Err(corrupt("filesystem tree node has fixed-kv geometry")
+                .with_context(node_context(block, paddr)));
         }
         if v.leaf {
             for i in 0..v.nkeys {
@@ -416,7 +443,7 @@ impl<'a> BtreeReader<'a> {
             let child_link = raw::u64_at(v.val_ptr(voff, 8)?, 0)?;
             if let Some(child_paddr) = self.resolve_child(omap_root, child_link, max_xid)? {
                 let child = self.read_node(child_paddr)?;
-                if !self.fs_walk_node(&child, omap_root, max_xid, visit, depth + 1)? {
+                if !self.fs_walk_node(&child, child_paddr, omap_root, max_xid, visit, depth + 1)? {
                     return Ok(false);
                 }
             } else {
@@ -440,8 +467,28 @@ impl<'a> BtreeReader<'a> {
     /// Access to the level field of a root node, for `inspect`/`verify`.
     pub fn root_level(&self, root_block: u64) -> Result<u16> {
         let block = self.read_node(root_block)?;
-        let v = NodeView::parse(&block, self.block_size as usize)?;
+        let v = self.node_view(&block, root_block)?;
         Ok(v.level)
+    }
+}
+
+fn node_context(block: &[u8], paddr: u64) -> String {
+    let checksum = if checksum::is_valid(block) {
+        "valid"
+    } else {
+        "invalid"
+    };
+    match ObjPhys::parse(block) {
+        Ok(header) => format!(
+            "B-tree block {paddr:#x}, checksum={checksum}, object_oid={:#x}, xid={:#x}, type={}({:#x}), subtype={}({:#x})",
+            header.oid,
+            header.xid,
+            super::obj::type_name(header.type_id()),
+            header.otype,
+            super::obj::type_name(header.subtype & super::obj::OBJECT_TYPE_MASK),
+            header.subtype
+        ),
+        Err(_) => format!("B-tree block {paddr:#x}, checksum={checksum}, object header unreadable"),
     }
 }
 

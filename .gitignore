@@ -204,3 +204,26 @@ vite.config.ts.timestamp-*
 .vite/
 
 *.lock
+
+# Local recovery investigations and user data
+/tmp/
+/2020-06-22.pdf
+/.apfsrelic-recovery/
+/*.sparsebundle/
+/*.backupbundle/
+/*.sparseimage
+/*.dmg
+/*.img
+/*.raw
+/*.dd
+/*.sqlite
+/*.sqlite3
+/recovery-output/
+/recovery-manifests/
+/history*.jsonl
+/history*.tsv
+/recovery*.jsonl
+/recovery*.tsv
+/unresolved*.jsonl
+/unresolved*.tsv
+/*-results.jsonl

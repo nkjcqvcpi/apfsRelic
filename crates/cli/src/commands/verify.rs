@@ -5,6 +5,8 @@
 //! volume is selected) volume object maps and superblock, and the filesystem
 //! B-tree root. Optionally scans the file extents of a `--path`.
 
+use std::borrow::Cow;
+
 use crate::cli::Options;
 use apfsrelic_core::apfs::checksum;
 use apfsrelic_core::apfs::vol::Volume;
@@ -151,7 +153,7 @@ fn scan_path(vol: &Volume, path: &str, checks: &mut Vec<Check>) {
             return;
         }
     };
-    let records = match vol.records(&bt, resolved.fsoid) {
+    let inode_records = match vol.records(&bt, resolved.fsoid) {
         Ok(r) => r,
         Err(e) => {
             checks.push(Check {
@@ -162,9 +164,43 @@ fn scan_path(vol: &Volume, path: &str, checks: &mut Vec<Check>) {
             return;
         }
     };
+    let inode = match Volume::inode_from_records(&inode_records) {
+        Ok(Some(inode)) => inode,
+        Ok(None) => {
+            checks.push(Check {
+                name: "path_inode".into(),
+                ok: false,
+                detail: Some(format!("no inode for FSOID {:#x}", resolved.fsoid)),
+            });
+            return;
+        }
+        Err(e) => {
+            checks.push(Check {
+                name: "path_inode".into(),
+                ok: false,
+                detail: Some(e.to_string()),
+            });
+            return;
+        }
+    };
+    let records = if inode.is_regular() {
+        match vol.file_data_records(&bt, resolved.fsoid, &inode, &inode_records) {
+            Ok(records) => records,
+            Err(e) => {
+                checks.push(Check {
+                    name: "path_data_records".into(),
+                    ok: false,
+                    detail: Some(e.to_string()),
+                });
+                return;
+            }
+        }
+    } else {
+        Cow::Borrowed(inode_records.as_slice())
+    };
     let mut extents = 0u64;
     let mut bad = 0u64;
-    for rec in &records {
+    for rec in records.iter() {
         if let Ok(v) = raw_type(&rec.key) {
             if v == apfsrelic_core::apfs::jrec::APFS_TYPE_FILE_EXTENT {
                 if let Ok(fe) = apfsrelic_core::apfs::jrec::FileExtent::parse(&rec.key, &rec.val) {

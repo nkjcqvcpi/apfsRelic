@@ -3,6 +3,7 @@
 
 use crate::cli::Options;
 use apfsrelic_core::apfs::btree::split_obj_id_and_type;
+use apfsrelic_core::apfs::decmpfs;
 use apfsrelic_core::apfs::jrec::{self, FileExtent, Inode, Xattr};
 use apfsrelic_core::apfs::path as apath;
 use apfsrelic_core::apfs::raw;
@@ -37,10 +38,20 @@ pub fn run(opts: &Options) -> Result<i32> {
 
     // Inode metadata.
     let inode = apfsrelic_core::apfs::vol::Volume::inode_from_records(&records)?;
+    let data_records = match &inode {
+        Some(inode) if inode.is_regular() && (!vol.apsb.is_encrypted() || opts.extents) => {
+            Some(vol.file_data_records(&bt, fsoid, inode, &records)?)
+        }
+        _ => None,
+    };
+    let extent_records = data_records.as_deref().unwrap_or(&records);
     let mut result = Json::obj().set("fsoid", format!("{fsoid:#x}"));
     if let Some(i) = &inode {
         result.insert("inode", inode_json(i));
-        result.insert("recoverability", recoverability(i, &vol, &records)?);
+        result.insert(
+            "recoverability",
+            recoverability(i, &vol, &bt, &records, extent_records)?,
+        );
     } else {
         result.insert("inode", Json::Null);
     }
@@ -49,7 +60,7 @@ pub fn run(opts: &Options) -> Result<i32> {
     if opts.extents {
         let mut extents = Vec::new();
         let mut total = 0u64;
-        for rec in &records {
+        for rec in extent_records {
             let (_oid, ty) = split_obj_id_and_type(raw::u64_at(&rec.key, 0)?);
             if ty == jrec::APFS_TYPE_FILE_EXTENT {
                 let fe = FileExtent::parse(&rec.key, &rec.val)?;
@@ -74,13 +85,26 @@ pub fn run(opts: &Options) -> Result<i32> {
             let (_oid, ty) = split_obj_id_and_type(raw::u64_at(&rec.key, 0)?);
             if ty == jrec::APFS_TYPE_XATTR {
                 let x = Xattr::parse(&rec.key, &rec.val)?;
-                xattrs.push(
-                    Json::obj()
-                        .set("name", x.name.as_str())
-                        .set("embedded", x.is_embedded())
-                        .set("stream", x.is_stream())
-                        .set("data_len", x.data.len()),
-                );
+                let mut xattr = Json::obj()
+                    .set("name", x.name.as_str())
+                    .set("embedded", x.is_embedded())
+                    .set("stream", x.is_stream())
+                    .set("data_len", x.data.len());
+                if let Some(stream) = x.dstream()? {
+                    xattr.insert("stream_id", Json::hex(stream.xattr_obj_id));
+                    xattr.insert("stream_size", stream.size);
+                    xattr.insert("stream_allocated_size", stream.allocated_size);
+                }
+                if x.name == decmpfs::DECMPFS_XATTR_NAME {
+                    let data = vol.read_xattr_data(&bt, &x)?;
+                    let header = decmpfs::parse_header(&data)?;
+                    xattr.insert("compression_type", header.compression_type);
+                    xattr.insert("compression_storage", header.storage().as_str());
+                    xattr.insert("compression_codec", header.codec());
+                    xattr.insert("uncompressed_size", header.uncompressed_size);
+                    xattr.insert("data_prefix_hex", hex(&data[..data.len().min(32)]));
+                }
+                xattrs.push(xattr);
             }
         }
         result.insert("xattrs", Json::Array(xattrs));
@@ -146,6 +170,7 @@ fn inode_json(i: &Inode) -> Json {
         .set("is_dir", i.is_dir())
         .set("is_symlink", i.is_symlink())
         .set("is_regular", i.is_regular())
+        .set("compressed", i.is_compressed())
         .set("sparse", i.is_sparse())
         .set("has_rsrc_fork", i.has_rsrc_fork())
         .set("has_finder_info", i.has_finder_info());
@@ -176,6 +201,8 @@ fn inode_json(i: &Inode) -> Json {
 fn recoverability(
     inode: &Inode,
     vol: &apfsrelic_core::apfs::vol::Volume,
+    bt: &apfsrelic_core::apfs::btree::BtreeReader,
+    inode_records: &[apfsrelic_core::apfs::btree::Record],
     records: &[apfsrelic_core::apfs::btree::Record],
 ) -> Result<Json> {
     if vol.apsb.is_encrypted() {
@@ -192,33 +219,83 @@ fn recoverability(
         return Ok(Json::obj().set("status", "ok").set("reason", "symlink"));
     }
     let size = inode.logical_size().unwrap_or(0);
-    let mut has_extent = false;
-    let mut has_hole = false;
+    if inode.is_compressed() {
+        let xattr =
+            apfsrelic_core::apfs::vol::Volume::xattr(inode_records, decmpfs::DECMPFS_XATTR_NAME)?
+                .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Corrupt,
+                    "compressed inode has no com.apple.decmpfs xattr",
+                )
+            })?;
+        let data = vol.read_xattr_data(bt, &xattr)?;
+        let header = decmpfs::parse_header(&data)?;
+        return Ok(Json::obj()
+            .set("status", "ok-compressed")
+            .set("size", size)
+            .set("compression_type", header.compression_type)
+            .set("compression_storage", header.storage().as_str())
+            .set("compression_codec", header.codec())
+            .set(
+                "compressed_size_matches_inode",
+                header.uncompressed_size == size,
+            ));
+    }
+    let mut extents = Vec::new();
     for rec in records {
         let (_oid, ty) = split_obj_id_and_type(raw::u64_at(&rec.key, 0)?);
         if ty == jrec::APFS_TYPE_FILE_EXTENT {
-            let fe = FileExtent::parse(&rec.key, &rec.val)?;
-            has_extent = true;
-            if fe.is_hole() {
-                has_hole = true;
-            }
+            extents.push(FileExtent::parse(&rec.key, &rec.val)?);
         }
     }
+    extents.sort_by_key(|extent| extent.logical_addr);
+
+    let has_extent = !extents.is_empty();
+    let mut has_hole = false;
+    let mut has_overlap = false;
+    let mut cursor = 0u64;
+    for extent in &extents {
+        if cursor >= size {
+            break;
+        }
+        if extent.logical_addr > cursor {
+            has_hole = true;
+            cursor = extent.logical_addr.min(size);
+        } else if extent.logical_addr < cursor {
+            has_overlap = true;
+            continue;
+        }
+        if cursor >= size {
+            break;
+        }
+        if extent.is_hole() {
+            has_hole = true;
+        }
+        cursor += extent.len.min(size - cursor);
+    }
+    if cursor < size {
+        has_hole = true;
+    }
+
     let status = if size == 0 {
         "ok"
+    } else if !has_extent && !inode.is_sparse() {
+        "no-extents"
+    } else if has_overlap || (has_hole && !inode.is_sparse()) {
+        "partial"
+    } else if has_hole {
+        "ok-sparse"
     } else if has_extent {
-        if has_hole {
-            "ok-sparse"
-        } else {
-            "ok"
-        }
+        "ok"
     } else {
         "no-extents"
     };
     Ok(Json::obj()
         .set("status", status)
         .set("size", size)
-        .set("has_extents", has_extent))
+        .set("has_extents", has_extent)
+        .set("has_holes", has_hole)
+        .set("has_overlaps", has_overlap))
 }
 
 fn jrec_type_name(ty: u8) -> &'static str {

@@ -43,9 +43,11 @@ fn dispatch(command: &str, opts: &cli::Options) -> Result<i32> {
         "partitions" => commands::partitions::run(opts),
         "volumes" => commands::volumes::run(opts),
         "snapshots" => commands::snapshots::run(opts),
+        "history-union" => commands::history_union::run(opts),
         "ls" => commands::ls::run(opts),
         "stat" => commands::stat::run(opts),
         "recover" => commands::recover::run(opts),
+        "recover-manifest" => commands::recover_manifest::run(opts),
         "verify" => commands::verify::run(opts),
         other => Err(Error::new(
             ErrorKind::Usage,
@@ -102,9 +104,11 @@ COMMANDS:\n\
   partitions   List GPT partitions of an image\n\
   volumes      List volumes in the container\n\
   snapshots    List a volume's snapshots\n\
+  history-union Build a newest-wins leaf manifest across snapshots\n\
   ls           List a directory (machine-readable with --json)\n\
   stat         Show all metadata for a file/dir (--records --extents --xattrs)\n\
   recover      Recover a file or folder by path/FSOID\n\
+  recover-manifest Recover JSONL-selected snapshot leaves under one output root\n\
   verify       Structural integrity checks\n\
 \n\
 COMMON OPTIONS:\n\
@@ -114,13 +118,19 @@ COMMON OPTIONS:\n\
   --offset <bytes>       Explicit APFS container byte offset\n\
   --max-xid <xid>        Cap checkpoint selection at this transaction id\n\
   --snapshot <name> | --snapshot-xid <xid>   Browse a snapshot\n\
+  --path-template <p>  Per-snapshot root; {{snapshot-dir}} strips the Time Machine prefix\n\
+  --format <jsonl|tsv> History manifest format (default: jsonl)\n\
   --path <p> | --fsoid <id>   Filesystem entry point\n\
   --output <p>           Recovery destination (file or folder)\n\
+  --manifest <jsonl> --output-root <dir>  Batch recovery input and fixed destination\n\
+  --fallback-history     Retry failed/partial rows in older snapshots\n\
   --json                 Emit stable JSON on stdout (logs go to stderr)\n\
 \n\
 EXAMPLES:\n\
   apfsrelic inspect  --container tm.sparsebundle --json\n\
+  apfsrelic history-union --container tm.sparsebundle --volume 1 --path-template '/{{snapshot-dir}}/Macintosh HD - Data/Users/me' --format jsonl --output history.jsonl\n\
   apfsrelic ls       --container tm.sparsebundle --volume 1 --path / --json --sizes\n\
-  apfsrelic recover  --container tm.sparsebundle --volume 1 --path /Users/x/f --output ./f\n"
+  apfsrelic recover  --container tm.sparsebundle --volume 1 --path /Users/x/f --output ./f\n\
+  apfsrelic recover-manifest --container tm.sparsebundle --volume 1 --manifest rows.jsonl --output-root ./restored --fallback-history --path-template '/{{snapshot-dir}}/Data/Users/me'\n"
     );
 }

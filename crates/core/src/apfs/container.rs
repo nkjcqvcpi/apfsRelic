@@ -159,11 +159,14 @@ impl Container {
             if fs_oid == 0 {
                 continue;
             }
-            let entry = match bt.omap_get(self.nx_omap_tree_root, fs_oid, self.nx.xid)? {
-                Some(e) => e,
+            let paddr = match super::resolver::readable_paddr(
+                bt.omap_get(self.nx_omap_tree_root, fs_oid, self.nx.xid)?,
+                &format!("volume {} superblock", i + 1),
+            )? {
+                Some(paddr) => paddr,
                 None => continue,
             };
-            let blk = self.dev.read_block(entry.val.paddr, self.block_size)?;
+            let blk = self.dev.read_block(paddr, self.block_size)?;
             if let Ok(apsb) = ApfsSuperblock::parse(&blk) {
                 if apsb.magic == super::volume::APFS_MAGIC {
                     out.push(VolumeSlot {
@@ -192,12 +195,12 @@ impl Container {
             return Err(not_found_obj(format!("volume {index} does not exist")));
         }
         let bt = self.btree();
-        let entry = bt
-            .omap_get(self.nx_omap_tree_root, fs_oid, self.nx.xid)?
-            .ok_or_else(|| {
-                not_found_obj(format!("volume {index} superblock not in container omap"))
-            })?;
-        let blk = self.dev.read_block(entry.val.paddr, self.block_size)?;
+        let paddr = super::resolver::readable_paddr(
+            bt.omap_get(self.nx_omap_tree_root, fs_oid, self.nx.xid)?,
+            &format!("volume {index} superblock"),
+        )?
+        .ok_or_else(|| not_found_obj(format!("volume {index} superblock not in container omap")))?;
+        let blk = self.dev.read_block(paddr, self.block_size)?;
         let apsb = ApfsSuperblock::parse(&blk)?;
         apsb.check_magic()?;
         Ok(apsb)

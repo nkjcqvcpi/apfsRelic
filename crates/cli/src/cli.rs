@@ -17,6 +17,7 @@ const FLAGS: &[&str] = &[
     "best-effort",
     "raw-extents",
     "overwrite",
+    "fallback-history",
     "dry-run",
     "records",
     "extents",
@@ -38,13 +39,20 @@ pub struct Options {
     pub json: bool,
     pub sizes: bool,
     pub path: Option<String>,
+    /// Per-snapshot root path. `{snapshot}` is replaced with the snapshot name.
+    pub path_template: Option<String>,
     pub fsoid: Option<u64>,
     pub output: Option<String>,
+    /// JSONL work list consumed by `recover-manifest` (`-` means stdin).
+    pub manifest: Option<PathBuf>,
+    /// Fixed destination boundary for manifest recovery.
+    pub output_root: Option<PathBuf>,
     pub snapshot: Option<String>,
     pub snapshot_xid: Option<u64>,
     pub best_effort: bool,
     pub raw_extents: bool,
     pub overwrite: bool,
+    pub fallback_history: bool,
     pub dry_run: bool,
     pub records: bool,
     pub extents: bool,
@@ -55,6 +63,8 @@ pub struct Options {
     pub recursive: bool,
     pub metadata: Option<String>,
     pub sort: Option<String>,
+    /// Streaming manifest format (`jsonl` or `tsv`).
+    pub format: Option<String>,
     /// Per-command `--help` is accepted for forward-compat; top-level help is
     /// handled in `main` before options are parsed.
     #[allow(dead_code)]
@@ -73,13 +83,17 @@ impl Default for Options {
             json: false,
             sizes: false,
             path: None,
+            path_template: None,
             fsoid: None,
             output: None,
+            manifest: None,
+            output_root: None,
             snapshot: None,
             snapshot_xid: None,
             best_effort: false,
             raw_extents: false,
             overwrite: false,
+            fallback_history: false,
             dry_run: false,
             records: false,
             extents: false,
@@ -88,6 +102,7 @@ impl Default for Options {
             recursive: false,
             metadata: None,
             sort: None,
+            format: None,
             help: false,
         }
     }
@@ -150,6 +165,7 @@ pub fn parse(args: &[String]) -> Result<Options> {
         best_effort: flags.iter().any(|f| f == "best-effort"),
         raw_extents: flags.iter().any(|f| f == "raw-extents"),
         overwrite: flags.iter().any(|f| f == "overwrite"),
+        fallback_history: flags.iter().any(|f| f == "fallback-history"),
         dry_run: flags.iter().any(|f| f == "dry-run"),
         records: flags.iter().any(|f| f == "records"),
         extents: flags.iter().any(|f| f == "extents"),
@@ -196,12 +212,15 @@ pub fn parse(args: &[String]) -> Result<Options> {
                 })?
             }
             "path" => opts.path = Some(v),
+            "path-template" => opts.path_template = Some(v),
             "fsoid" => {
                 opts.fsoid = Some(parse_number(&v).ok_or_else(|| {
                     Error::new(ErrorKind::Usage, format!("invalid --fsoid `{v}`"))
                 })?)
             }
             "output" => opts.output = Some(v),
+            "manifest" => opts.manifest = Some(PathBuf::from(v)),
+            "output-root" => opts.output_root = Some(PathBuf::from(v)),
             "snapshot" => opts.snapshot = Some(v),
             "snapshot-xid" => {
                 opts.snapshot_xid = Some(parse_number(&v).ok_or_else(|| {
@@ -210,6 +229,7 @@ pub fn parse(args: &[String]) -> Result<Options> {
             }
             "metadata" => opts.metadata = Some(v),
             "sort" => opts.sort = Some(v),
+            "format" => opts.format = Some(v),
             // Accepted for backwards compatibility with the GUI/base args; the
             // block size is auto-detected from the container superblock, so any
             // value (including "auto") is honoured only when it is a number.
@@ -261,5 +281,41 @@ mod tests {
     #[test]
     fn unknown_option_errors() {
         assert!(parse(&["--bogus".into(), "x".into()]).is_err());
+    }
+
+    #[test]
+    fn parses_history_manifest_options() {
+        let args = vec![
+            "--path-template".into(),
+            "/{snapshot}/Data/Users/me".into(),
+            "--format".into(),
+            "tsv".into(),
+        ];
+        let options = parse(&args).unwrap();
+        assert_eq!(
+            options.path_template.as_deref(),
+            Some("/{snapshot}/Data/Users/me")
+        );
+        assert_eq!(options.format.as_deref(), Some("tsv"));
+    }
+
+    #[test]
+    fn parses_recover_manifest_options() {
+        let args = vec![
+            "--manifest".into(),
+            "rows.jsonl".into(),
+            "--output-root=/restore".into(),
+            "--fallback-history".into(),
+        ];
+        let options = parse(&args).unwrap();
+        assert_eq!(
+            options.manifest.as_deref(),
+            Some(std::path::Path::new("rows.jsonl"))
+        );
+        assert_eq!(
+            options.output_root.as_deref(),
+            Some(std::path::Path::new("/restore"))
+        );
+        assert!(options.fallback_history);
     }
 }
